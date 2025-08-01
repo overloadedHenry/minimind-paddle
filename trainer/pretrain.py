@@ -19,6 +19,13 @@ from dataset.custom_dataset import PretrainDataset
 
 warnings.filterwarnings('ignore')
 
+def check_model_parameters(model):
+    print("Model parameters info:")
+    for name, param in model.named_parameters():
+        print(f"{name}: {param.shape}, requires_grad: {not param.stop_gradient}")
+        if param.grad is not None:
+            print(f"  grad shape: {param.grad.shape}")
+    print("-" * 50)
 
 def Logger(content):
     if not ddp or dist.get_rank() == 0:
@@ -64,7 +71,9 @@ def train_epoch(epoch, wandb):
             # for param in model.parameters():
             #     if param.grad is not None:
             #         print(param.name, param.grad.shape)
-            paddle.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            # check_model_parameters(model)
+            # exit()
+            # paddle.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
             scaler.step(optimizer)
             scaler.update()
@@ -234,7 +243,7 @@ if __name__ == "__main__":
     )
 
     scaler = paddle.amp.GradScaler(enable=(args.dtype in ['float16', 'bfloat16']))
-    optimizer = optimizer.AdamW(learning_rate=args.learning_rate, parameters=model.parameters())
+    optimizer = optimizer.AdamW(learning_rate=args.learning_rate, parameters=model.parameters(), grad_clip=nn.ClipGradByGlobalNorm(args.grad_clip) if args.grad_clip > 0 else None)
 
     if ddp:
         model._ddp_params_and_buffers_to_ignore = {"pos_cis"}
