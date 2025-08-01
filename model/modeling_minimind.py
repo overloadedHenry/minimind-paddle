@@ -37,6 +37,7 @@ class MiniMindConfig(PretrainedConfig):
             aux_loss_alpha: float = 0.1,
             seq_aux: bool = True,
             norm_topk_prob: bool = True,
+            tie_word_embeddings=True,
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -66,6 +67,7 @@ class MiniMindConfig(PretrainedConfig):
         self.aux_loss_alpha = aux_loss_alpha  # 辅助损失的alpha参数
         self.seq_aux = seq_aux  # 是否在序列级别上计算辅助损失
         self.norm_topk_prob = norm_topk_prob  # 是否标准化top-k概率
+        self.tie_word_embeddings=tie_word_embeddings
 
 
 # 📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘
@@ -436,6 +438,34 @@ class MiniMindModel(nn.Layer):
 
         return hidden_states, presents, aux_loss
 
+class MiniMindLMHead(nn.Layer):
+    def __init__(self, config: MiniMindConfig, embedding_weights=None, transpose_y=False):
+        super(MiniMindLMHead, self).__init__()
+        self.config = config
+        vocab_size = config.vocab_size
+        self.transpose_y = transpose_y
+
+        if transpose_y:
+            if embedding_weights is not None:
+                self.weight = embedding_weights
+            else:
+                self.weight = self.create_parameter(
+                    shape=[vocab_size, config.hidden_size],
+                    dtype=paddle.get_default_dtype(),
+                )
+        else:
+            self.weight = self.create_parameter(
+                    shape=[config.hidden_size, vocab_size],
+                    dtype=paddle.get_default_dtype(),
+                )
+            
+    def forward(self, hidden_states, tensor_parallel_output=None, batch_size=None):
+
+        logits = paddle.matmul(
+            hidden_states, self.weight, transpose_y=self.transpose_y
+        )
+        return logits
+
 
 class MiniMindForCausalLM(PretrainedModel, GenerationMixin):
     config_class = MiniMindConfig
@@ -444,9 +474,11 @@ class MiniMindForCausalLM(PretrainedModel, GenerationMixin):
         self.config = config or MiniMindConfig()
         super().__init__(self.config)
         self.model = MiniMindModel(self.config)
-        self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias_attr=False)
-        transposed_weight = paddle.transpose(self.model.embed_tokens.weight, [1, 0])
-        self.lm_head.weight.set_value(transposed_weight)
+        if config.tie_word_embeddings:
+            self.lm_head = MiniMindLMHead(config, embedding_weights=self.model.embed_tokens.weight, transpose_y=True)
+            self.tie_weights()
+        else:
+            self.lm_head = MiniMindLMHead(config)
         self.OUT = CausalLMOutputWithPast()
 
     def forward(self,
@@ -470,3 +502,9 @@ class MiniMindForCausalLM(PretrainedModel, GenerationMixin):
         self.OUT.__setitem__('aux_loss', aux_loss)
         self.OUT.__setitem__('past_key_values', past_kvs)
         return self.OUT
+    
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
