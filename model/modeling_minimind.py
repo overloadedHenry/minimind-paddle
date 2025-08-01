@@ -507,8 +507,4 @@ class MiniMindForCausalLM(PretrainedModel, GenerationMixin):
         return self.lm_head
 
     def get_input_embeddings(self):
-<<<<<<< HEAD
         return self.model.embed_tokens
-=======
-        return self.model.embed_tokens
->>>>>>> fc6e9892b3659493c1689b7a9cee6d2d9ae54fb1
