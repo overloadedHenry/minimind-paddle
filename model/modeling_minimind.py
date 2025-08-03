@@ -143,7 +143,7 @@ def repeat_kv(x: paddle.Tensor, n_rep: int) -> paddle.Tensor:
         .reshape([bs, slen, num_key_value_heads * n_rep, head_dim])
     )
 
-
+# def scaled_dot_product_attention(q, k, v):
 class Attention(nn.Layer):
     def __init__(self, args: MiniMindConfig):
         super().__init__()
@@ -191,13 +191,13 @@ class Attention(nn.Layer):
         )
 
 
-        if self.flash and seq_len != 1 and not x.place.custom_device_type() == 'gpu':
+        if self.flash and seq_len != 1 :
             dropout_p = self.dropout if self.training else 0.0
             attn_mask = None
             if attention_mask is not None:
                 attn_mask = attention_mask.view(bsz, 1, 1, -1).expand(bsz, self.n_local_heads, seq_len, -1)
                 attn_mask = attn_mask.bool() if attention_mask is not None else None
-
+            
             output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=True)
             # attn_score = (xq @ xk.transpose([0, 1, 3, 2])) / math.sqrt(self.head_dim) 
             # if attn_mask is not None:

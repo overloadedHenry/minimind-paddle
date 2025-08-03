@@ -16,7 +16,7 @@ from paddle.distributed import fleet
 from contextlib import nullcontext
 from paddlenlp.transformers import AutoTokenizer
 from model.modeling_minimind import MiniMindConfig, MiniMindForCausalLM
-from dataset.custom_dataset import PretrainDataset
+from dataset.custom_dataset import SFTDataset
 from utils.get_custom_device import auto_detect_device
 warnings.filterwarnings('ignore')
 
@@ -30,7 +30,7 @@ def get_lr(current_step, total_steps, lr):
     return lr / 10 + 0.5 * lr * (1 + math.cos(math.pi * current_step / total_steps))
 
 
-def train_epoch(epoch, swanlab, opt):
+def train_epoch(epoch, swanlab):
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
     for step, (X, Y, loss_mask) in enumerate(train_loader):
@@ -94,7 +94,7 @@ def train_epoch(epoch, swanlab, opt):
         if (step + 1) % args.save_interval == 0 and (not args.ddp or dist.get_rank() == 0):
             model.eval()
             moe_path = '_moe' if lm_config.use_moe else ''
-            ckp = f'{args.save_dir}/pretrain_{lm_config.hidden_size}{moe_path}_{ddp_rank}_swanlab.pth'
+            ckp = f'{args.save_dir}/pretrain_{lm_config.hidden_size}{moe_path}_swanlab.pth'
 
             # if isinstance(model, paddle.DataParallel):
             #     state_dict = model.state_dict()
@@ -104,6 +104,14 @@ def train_epoch(epoch, swanlab, opt):
             # state_dict = {k: v.half() for k, v in state_dict.items()}  # 半精度保存
             paddle.save(state_dict, ckp)
             model.train()
+
+
+def init_model(lm_config):
+    tokenizer = AutoTokenizer.from_pretrained('../model')
+    model = MiniMindForCausalLM(lm_config)
+
+    return model, tokenizer
+
 
 
 def init_distributed_mode():
@@ -123,10 +131,12 @@ if __name__ == "__main__":
     defualt_device = auto_detect_device()
     # print(defualt_device)
     # exit()
-    parser = argparse.ArgumentParser(description="MiniMind Pretraining")
-    parser.add_argument("--model_path", type=str, default='./model')
+    parser = argparse.ArgumentParser(description="MiniMind SFT")
+    parser.add_argument("--tokenizer_path", type=str, default="./model")
+    parser.add_argument("--checkpoint", type=str, default="/home/hyg/minimind-paddle/out/pretrain_512_0_swanlab.pth")
     parser.add_argument("--out_dir", type=str, default="./out")
-    parser.add_argument("--epochs", type=int, default=5)
+    # 若要以最快速度实现zero则epochs设置为1轮；否则应当利用有限的数据训练2~6个epochs。
+    parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=5e-4)
     parser.add_argument("--device", type=str, default=defualt_device)
@@ -160,11 +170,17 @@ if __name__ == "__main__":
 
     args.swanlab_run_name = f"MiniMind-Pretrain-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     model = MiniMindForCausalLM(lm_config)
-    
-    train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
+
+    state_dict = paddle.load(args.checkpoint)
+    model.set_state_dict(state_dict)
+
+    Logger(f'LLM可训练总参数量：{sum(p.numel() for p in model.parameters() if not p.stop_gradient) / 1e6:.3f} 百万')
+
+    train_ds = SFTDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
     train_sampler = DistributedBatchSampler(train_ds, batch_size=args.batch_size) if args.ddp else None
+
     if args.ddp:
 
         init_distributed_mode()
@@ -179,7 +195,9 @@ if __name__ == "__main__":
             batch_sampler=train_sampler
         )
         print("DDP setting up")
+
     else:
+        model = model.to(args.device)
         train_loader = DataLoader(
             train_ds,
             batch_size=args.batch_size,
@@ -189,10 +207,8 @@ if __name__ == "__main__":
             batch_sampler=train_sampler
         )
 
-
     opt = optimizer.AdamW(learning_rate=args.learning_rate, parameters=model.parameters(), grad_clip=nn.ClipGradByGlobalNorm(args.grad_clip) if args.grad_clip > 0 else None)
 
-    Logger(f'LLM可训练总参数量：{sum(p.numel() for p in model.parameters() if not p.stop_gradient) / 1e6:.3f} 百万')
 
 
     global ctx_dict
@@ -235,4 +251,4 @@ if __name__ == "__main__":
 
     iter_per_epoch = len(train_loader)
     for epoch in range(args.epochs):
-        train_epoch(epoch, swanlab, opt)
+        train_epoch(epoch, swanlab)

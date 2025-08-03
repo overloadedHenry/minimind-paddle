@@ -112,9 +112,9 @@ class SFTDataset(Dataset):
         loss_mask = self._generate_loss_mask(input_ids)
 
         # 构建训练数据
-        X = paddle.tensor(input_ids[:-1], dtype=paddle.long)
-        Y = paddle.tensor(input_ids[1:], dtype=paddle.long)
-        loss_mask = paddle.tensor(loss_mask[1:], dtype=paddle.long)  # 对齐预测位置
+        X = paddle.to_tensor(input_ids[:-1], dtype=paddle.int64)
+        Y = paddle.to_tensor(input_ids[1:], dtype=paddle.int64)
+        loss_mask = paddle.to_tensor(loss_mask[1:], dtype=paddle.int64)  # 对齐预测位置
 
         return X, Y, loss_mask
 
@@ -160,12 +160,12 @@ class DPODataset(Dataset):
 
         rejected_input_ids = rejected_encoding['input_ids']
         rejected_loss_mask = self._generate_loss_mask(rejected_input_ids)
-        x_chosen = paddle.tensor(chosen_input_ids[:-1], dtype=paddle.long)
-        y_chosen = paddle.tensor(chosen_input_ids[1:], dtype=paddle.long)
-        mask_chosen = paddle.tensor(chosen_loss_mask[1:], dtype=paddle.long)
-        x_rejected = paddle.tensor(rejected_input_ids[:-1], dtype=paddle.long)
-        y_rejected = paddle.tensor(rejected_input_ids[1:], dtype=paddle.long)
-        mask_rejected = paddle.tensor(rejected_loss_mask[1:], dtype=paddle.long)
+        x_chosen = paddle.tensor(chosen_input_ids[:-1], dtype=paddle.int64)
+        y_chosen = paddle.tensor(chosen_input_ids[1:], dtype=paddle.int64)
+        mask_chosen = paddle.tensor(chosen_loss_mask[1:], dtype=paddle.int64)
+        x_rejected = paddle.tensor(rejected_input_ids[:-1], dtype=paddle.int64)
+        y_rejected = paddle.tensor(rejected_input_ids[1:], dtype=paddle.int64)
+        mask_rejected = paddle.tensor(rejected_loss_mask[1:], dtype=paddle.int64)
 
         return {
             'x_chosen': x_chosen,
