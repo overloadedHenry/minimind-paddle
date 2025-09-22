@@ -1,37 +1,29 @@
-import os
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-import argparse
-import time
-import math
-import warnings
+import logging
 import paddle
-import paddle.nn as nn
-import paddle.distributed as dist
-from paddle import optimizer
-from paddle.io import DataLoader, DistributedBatchSampler
-from contextlib import nullcontext
-from paddlenlp.transformers import AutoTokenizer
-from model.modeling_minimind import MiniMindConfig, MiniMindForCausalLM
-from dataset.custom_dataset import PretrainDataset
+# 配置 logging 输出到控制台
+def get_logger(log_level, name="root"):
+    logger = logging.getLogger(name)
 
+    # Avoid printing multiple logs
+    logger.propagate = False
 
-
-def check_model_parameters(model):
-    print("Model parameters info:")
-    for name, param in model.named_parameters():
-        print(f"{name}: {param.shape}, requires_grad: {param.stop_gradient}")
-        if param.grad is not None:
-            print(f"  grad shape: {param.grad.shape}")
-    print("-" * 50)
-
-if __name__ == '__main__':
-
-    lm_config = MiniMindConfig(hidden_size=512, num_hidden_layers=8, use_moe=False)
-
-    model = MiniMindForCausalLM.from_pretrained(lm_config).to('npu:0')
-    tokenizer = AutoTokenizer.from_pretrained('/home/hyg/minimind-paddle/model')
-    check_model_parameters(model)
-
-    
+    if not logger.handlers:
+        log_handler = logging.StreamHandler()
+        logger.setLevel(log_level)
+        log_format = logging.Formatter(
+            '[%(asctime)-15s] [%(levelname)8s] %(filename)s:%(lineno)s - %(message)s'
+        )
+        log_handler.setFormatter(log_format)
+        logger.addHandler(log_handler)
+    else:
+        logger.setLevel(log_level)
+    return logger
+# logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = get_logger("INFO","minimind")
+# 测试不同级别的日志输出
+# logging.debug('This is a debug message')
+# logging.info('This is an info message')
+# logging.warning('This is a warning message')
+# logging.error('This is an error message')
+# logging.critical('This is a critical message')
+logger.info('Logger is configured and ready to use.')

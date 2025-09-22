@@ -2,7 +2,6 @@ import os
 import sys
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from tqdm.auto import tqdm
 import argparse
 import time
 import math
@@ -18,30 +17,32 @@ from paddlenlp.transformers import AutoTokenizer
 from model.modeling_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.custom_dataset import PretrainDataset
 from utils.get_custom_device import auto_detect_device
+import paddle.nn.functional as F
+from utils.log_info import log_training_and_model_info
+from utils.callback import ProgressHandler
+from paddle.distributed.utils.log_utils import get_logger
 warnings.filterwarnings('ignore')
-
-
-def Logger(content):
-    if not args.ddp or dist.get_rank() == 0:
-        print(content)
-
 
 def get_lr(current_step, total_steps, lr):
     return lr / 10 + 0.5 * lr * (1 + math.cos(math.pi * current_step / total_steps))
 
 
 def train_epoch(epoch, swanlab, opt):
+    world_size = dist.get_world_size() if args.ddp else 1
+    per_process_batches = len(train_loader)
+    per_process_opt_steps = math.ceil(per_process_batches / args.accumulation_steps)
+    global_opt_steps_per_epoch = per_process_opt_steps * world_size
+    is_main = (not args.ddp) or (dist.get_rank() == 0)
+    callback = ProgressHandler(total_steps=global_opt_steps_per_epoch, desc=f"Epoch {epoch+1}/{args.epochs}", enabled=is_main)
+
     model.train()
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
     
-    if dist.get_rank() == 0:
-        train_loop = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch: [{epoch + 1}/{args.epochs}]", ncols=100, leave=False, dynamic_ncols=True, ascii=True)
-    else:
-        train_loop =  enumerate(train_loader)
     
+    step_times = 0
 
-    for step, (X, Y, loss_mask) in train_loop:
+    for step, (X, Y, loss_mask) in enumerate(train_loader):
         X = X.to(args.device)
         Y = Y.to(args.device)
         loss_mask = loss_mask.to(args.device)
@@ -49,10 +50,7 @@ def train_epoch(epoch, swanlab, opt):
         lr = get_lr(epoch * iter_per_epoch + step, args.epochs * iter_per_epoch, args.learning_rate)
         opt.set_lr(lr)
 
-        if ctx_dict["auto_cast"]:
-            ctx = paddle.amp.auto_cast(ctx_dict["dtype"])
-        else:
-            ctx = nullcontext()
+        ctx = paddle.amp.auto_cast(args.dtype in ['float16', 'bfloat16'], dtype=args.dtype) if args.dtype in ['float16', 'bfloat16'] and args.device != 'cpu' else nullcontext()
 
         with ctx:
             res = model(X)
@@ -72,9 +70,12 @@ def train_epoch(epoch, swanlab, opt):
             scaler.update()
 
             opt.clear_grad()
-        
-        if dist.get_rank() == 0:
-            train_loop.set_postfix(loss=loss.item() * args.accumulation_steps, lr=opt.get_lr())
+            step_times += 1
+
+            if (step_times * world_size) % args.log_interval == 0:
+
+                callback.update(n=(dist.get_world_size() if args.ddp else 1) * step_times)
+                step_times = 0
 
         if (swanlab is not None) and (not args.ddp or dist.get_rank() == 0):
             swanlab.log({"loss": loss.item() * args.accumulation_steps,
@@ -85,17 +86,13 @@ def train_epoch(epoch, swanlab, opt):
             
             model.eval()
             moe_path = '_moe' if lm_config.use_moe else ''
-            ckp = f'{args.save_dir}/pretrain_{lm_config.hidden_size}{moe_path}_{ddp_rank}_swanlab.pth'
+            ckp = f'{args.save_dir}/pretrain_{lm_config.hidden_size}{moe_path}_swanlab.pth'
 
-            # if isinstance(model, paddle.DataParallel):
-            #     state_dict = model.state_dict()
-            # else:
-            #     state_dict = model.state_dict()
             state_dict = model.state_dict()
-            # state_dict = {k: v.half() for k, v in state_dict.items()}  # 半精度保存
+            state_dict = {k: v.astype('float16') for k, v in state_dict.items()}  
             paddle.save(state_dict, ckp)
             model.train()
-        # exit()
+
 if __name__ == "__main__":
     
     defualt_device = auto_detect_device()
@@ -104,7 +101,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, default='./model')
     parser.add_argument("--out_dir", type=str, default="./out")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=5e-4)
     parser.add_argument("--device", type=str, default=defualt_device)
     parser.add_argument("--dtype", type=str, default="float16")
@@ -115,14 +112,14 @@ if __name__ == "__main__":
     parser.add_argument("--accumulation_steps", type=int, default=8)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--warmup_iters", type=int, default=0)
-    parser.add_argument("--log_interval", type=int, default=100)
+    parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--save_interval", type=int, default=100)
     parser.add_argument('--local_rank', type=int, default=-1)
     parser.add_argument('--hidden_size', default=512, type=int)
     parser.add_argument('--num_hidden_layers', default=8, type=int)
     parser.add_argument('--max_seq_len', default=512, type=int)
     parser.add_argument('--use_moe', default=False, type=bool)
-    parser.add_argument("--data_path", type=str, default="/home/hyg/minimind_dataset/sft_512.jsonl")
+    parser.add_argument("--data_path", type=str, default="./")
     args = parser.parse_args()
 
     lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=args.use_moe)
@@ -139,23 +136,23 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     model = MiniMindForCausalLM(lm_config)
-    
+
     train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
-    train_sampler = DistributedBatchSampler(train_ds, batch_size=args.batch_size) if args.ddp else None
+    train_sampler = None
+
     if args.ddp:
-
+        
         ddp_rank = dist.get_rank()
-
         paddle.seed(base_seed + ddp_rank)
-
         fleet.init(is_collective=True)
         model = fleet.distributed_model(model)
+        train_sampler = DistributedBatchSampler(train_ds, batch_size=args.batch_size)
         train_loader = DataLoader(
             train_ds,
             num_workers=args.num_workers,
             batch_sampler=train_sampler
         )
-        print("DDP setting up")
+
     else:
         
         train_loader = DataLoader(
@@ -170,26 +167,9 @@ if __name__ == "__main__":
 
     opt = optimizer.AdamW(learning_rate=args.learning_rate, parameters=model.parameters(), grad_clip=nn.ClipGradByGlobalNorm(args.grad_clip) if args.grad_clip > 0 else None)
 
-    Logger(f'LLM可训练总参数量：{sum(p.numel() for p in model.parameters() if not p.stop_gradient) / 1e6:.3f} 百万')
+    if args.ddp:
+        opt = fleet.distributed_optimizer(opt)
 
-
-    global ctx_dict
-    ctx_dict = {
-        'auto_cast': False,
-        'dtype': None
-    }
-
-    if args.dtype == 'bfloat16' and paddle.device.is_compiled_with_cinn():
-        ctx_dict['auto_cast'] = True
-        ctx_dict['dtype'] = 'bfloat16'
-        
-    else:
-        dtype = 'float16' if args.dtype == 'float16' else 'float32'
-        if dtype != 'float32':
-            ctx_dict['auto_cast'] = True
-            ctx_dict['dtype'] = dtype
-        else:
-            ctx_dict['auto_cast'] = False
 
 
     scaler = paddle.amp.GradScaler(enable=(args.dtype in ['float16', 'bfloat16']))
@@ -211,5 +191,9 @@ if __name__ == "__main__":
 
 
     iter_per_epoch = len(train_loader)
+
+    logger = get_logger("INFO","minimind")
+    world_size = dist.get_world_size() if args.ddp else 1
+    log_training_and_model_info(logger, args, lm_config, model, world_size)
     for epoch in range(args.epochs):
         train_epoch(epoch, swanlab, opt)
